@@ -1,6 +1,7 @@
 import re
 from typing import Callable, Optional
-from config import *
+from .agent_call import *
+from config import get_settings
 from infrastructure import load_chat_model
 from tools import (
     web_search,
@@ -16,79 +17,95 @@ from logging_config import (
     log_tool_call,
     log_tool_result,
 )
-from langchain.agents import create_agent
+from infrastructure.schema import chat_llm_state, screenshot_llm_state
+from infrastructure.schema import screenshot_respond
+from infrastructure.schema import ChatResponse
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import START, END, StateGraph
 from langchain.messages import HumanMessage, AIMessage, ToolMessage
 
 # 截图工具"无新鲜截图"时返回的特殊标记（服务端据此触发客户端截图流程）
 SCREENSHOT_MARKER = "__SCREENSHOT_REQUESTED__"
 
+settings = get_settings()
 # ---------- 工具函数 ----------
 def clean_response(content: str) -> str:
     cleaned = re.sub(r'^.*?</think>', '', content, flags=re.DOTALL | re.IGNORECASE)
     cleaned = re.sub(r'\n\s*\n+', '\n\n', cleaned)
     return cleaned.strip()
 
+chat_agent_tools = [web_search, 
+                    rag_search, 
+                    mcmod_search,
+                    make_request_screenshot_tool(thread_id="", 
+                                                 screenshot_uploaded=False, 
+                                                 screenshot_round=0)]
+
+
 # ---------- Agent 构建 ----------
 _checkpointer = MemorySaver()
 
+# 构建LLM实例（全局共享，避免重复加载）
+llm = load_chat_model()
 
-def build_agent(
-    thread_id: str = "user-session-1",
-    screenshot_uploaded: bool = False,
-    screenshot_round: int = 0,
-):
-    """构建 Agent 实例（使用基础设施中的 ChatModel）
+chat_agent_graph = StateGraph(chat_llm_state)
+screenshot_subagent_graph = StateGraph(screenshot_llm_state)
 
-    截图工具绑定到指定会话：Agent 判断用户询问屏幕内容时才会调用。
-    截图指导由模型在调用 request_screenshot 时通过 instruction 参数生成。
-    """
-    chat = load_chat_model()
-    with open(ROLE_DESC_PATH, encoding="utf-8") as f:
-        role_desc = f.read().strip()
-    # role_description.txt 已包含各工具的使用说明和结果解读策略（含 mcmod_search 的
-    # matched/candidates 处理），这里只补充截图多轮交互的程序性约束。
-    system_prompt = (
-        f"{role_desc}\n\n"
-        "补充约束：调用 request_screenshot 时，必须在 instruction 参数中给出具体的截图指导，"
-        "告诉用户截图前应该准备什么画面（例如'请打开代码编辑器并确保报错信息完整可见'），"
-        "不要只写'请截图'这类空泛的话。"
-        "若截图信息不足以回答问题，可以再次调用 request_screenshot 请求新的截图，"
-        "并更新 instruction 说明这次需要看到什么。"
-        "当提示'截图已上传'时，必须调用 request_screenshot 工具读取截图后再回答，"
-        "绝不能在没有调用该工具的情况下声称'没有收到截图'。"
-        "不要编造屏幕内容。"
-    )
+# 添加节点
+chat_agent_graph.add_node("chat_agent_call", make_chat_agent_call(tool_list=chat_agent_tools, llm=llm))
+chat_agent_graph.add_node("screenshot_subagent", screenshot_subagent_graph)
+chat_agent_graph.add_node("should_go", should_go)
 
-    return create_agent(
-        model=chat,
-        tools=[
-            rag_search,
-            web_search,
-            mcmod_search,
-            make_request_screenshot_tool(
-                thread_id,
-                screenshot_uploaded,
-                screenshot_round,
-            ),
-        ],
-        system_prompt=system_prompt,
-        checkpointer=_checkpointer,
-    )
+# 添加边
+chat_agent_graph.add_edge(START, "chat_agent_call")
+screenshot_subagent_graph.add_edge(START, )
+chat_agent_graph.add_edge("chat_agent_call", "should_go")
+
+# 为了能够实现图的持久化和恢复，必须在图编译前设置 checkpointer
+chat_agent_graph.compile(checkpointer=_checkpointer)
 
 # ---------- 完整的对话响应（核心入口） ----------
 def get_response(
     user_query: str,
     thread_id: str = "user-session-1",
-    screenshot_uploaded: bool = False,
-    screenshot_round: int = 0,
+    request_type: str = "query",
     progress_callback: Optional[Callable[[str], None]] = None,
-) -> tuple[str, bool, str]:
+) -> ChatResponse:
     """调用 Agent，返回 (回复, 是否需要截图, 给用户的截图指导)。
 
     使用 stream 逐步执行，以便把模型的思考过程、工具调用与返回、
     最终输出都写入日志，方便 debug。
     """
+    if request_type == "query":
+        # 新问题，清空会话状态
+        _checkpointer.delete_thread(thread_id)
+        result = chat_agent_graph.invoke({"messages": [HumanMessage(content=user_query)],}, 
+                config={"configurable": {"thread_id": thread_id}},
+        )
+    elif request_type == "screenshot_interrupted_response":
+        # 续接问题，继续上次的会话状态, 此时的 user_query 是客户端上传的截图路径
+        result = chat_agent_graph.invoke(Command(resume=user_query),
+                config={"configurable": {"thread_id": thread_id}},
+        )
+
+    # 执行到需要interrupt时，invoke 返回：{"__interrupt__": [Interrupt(value=payload)], ...}
+    if "__interrupt__" in result:
+        # payload = {"type": "screenshot_request", "instruction": guidance}
+        # 也就是自定义的 interrupt 的 value字典
+        payload = result["__interrupt__"][0].value
+        return ChatResponse(
+            status="interrupted",
+            response="",
+            interrupt=payload,
+        )
+
+    return ChatResponse(
+                status="completed",
+                response=clean_response(result["messages"][-1].content),
+                interrupt="",
+            )
+
+
     logger = get_logger("agent")
 
     def report(message: str) -> None:
