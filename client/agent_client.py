@@ -88,19 +88,13 @@ class AgentClient:
             print(f"[错误] 无法连接服务 {self.base_url}: {error}")
             return False
 
-    def _post_chat(
-        self,
-        query: str,
-        screenshot_uploaded: bool = False,
-        screenshot_round: int = 0,
-    ) -> dict:
+    def _post_chat(self, query: str, status: str = "query") -> dict:
         response = requests.post(
             f"{self.base_url}/chat",
             json={
                 "query": query,
                 "thread_id": self.thread_id,
-                "screenshot_uploaded": screenshot_uploaded,
-                "screenshot_round": screenshot_round,
+                "status": status,
             },
             headers=self.headers,
             timeout=300,
@@ -110,12 +104,7 @@ class AgentClient:
         response.raise_for_status()
         return response.json()
 
-    def _post_chat_stream(
-        self,
-        query: str,
-        screenshot_uploaded: bool = False,
-        screenshot_round: int = 0,
-    ) -> dict:
+    def _post_chat_stream(self, query: str, screenshot_uploaded: bool = False, screenshot_round: int = 0,) -> dict:
         response = requests.post(
             f"{self.base_url}/chat/stream",
             json={
@@ -192,33 +181,21 @@ class AgentClient:
 
     def chat(self, query: str) -> str:
         """发送问题，并按 Agent 请求循环完成截图与续接。"""
-        result = self._post_chat_stream(query)
+        result = self._post_chat(query = query, status="query")
         screenshot_round = 0
 
-        while result.get("screenshot_requested", False):
-            if screenshot_round >= MAX_SCREENSHOT_ROUNDS:
-                return (
-                    f"{result['response']}\n"
-                    "已达到本次问题的截图次数上限，暂时无法继续获取屏幕信息。"
-                )
+        if result.get("status") == "interrupted":
+            payload = result.get("interrupt", {})
+            if payload.get("type") == "screenshot_request":
+                # Agent 请求截图，客户端执行倒计时截图并上传，然后续接对话。
+                print("Agent 请求查看屏幕。"+ (f" 截图指导：{payload.get('instruction', '')}" ))
+                try:
+                    screenshot_path = self.capture_after_countdown()["path"]
+                except ImportError:
+                    return "无法截图：客户端缺少依赖，请运行 pip install mss pillow"
 
-            screenshot_round += 1
-            instruction = result.get("screenshot_instruction", "")
-            print(
-                "Agent 请求查看屏幕。"
-                + (f" 截图指导：{instruction}" if instruction else "")
-            )
-            try:
-                self.capture_after_countdown()
-            except ImportError:
-                return "无法截图：客户端缺少依赖，请运行 pip install mss pillow"
-
-            # 依靠服务端 MemorySaver 继续之前的问题，不重复发送原问题。
-            result = self._post_chat_stream(
-                "",
-                screenshot_uploaded=True,
-                screenshot_round=screenshot_round,
-            )
+                # 依靠服务端 MemorySaver 继续之前的问题，不重复发送原问题。
+                result = self._post_chat(query=screenshot_path, status="screenshot_interrupted_response")
 
         return result["response"]
 

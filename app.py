@@ -4,16 +4,19 @@ import json
 import queue
 import threading
 import time
+from typing import Literal, Optional, Any
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
-
-from config import AGENT_API_KEY
+from config import get_settings
+from infrastructure.schema import ChatRequest, ChatResponse
 from infrastructure import ensure_all_loaded
 from agent.core import get_response
 from tools import save_screenshot, cleanup_old_screenshots
 from logging_config import get_logger, setup_logging
+
+settings = get_settings()
 
 # ---------- 生命周期 ----------
 @asynccontextmanager
@@ -37,23 +40,12 @@ app = FastAPI(lifespan=lifespan)
 # ---------- 认证 ----------
 def require_api_key(x_api_key: str = Header(default="")):
     """校验请求头 X-API-Key；未配置 AGENT_API_KEY 时跳过校验（仅本地开发）"""
-    if not AGENT_API_KEY:
+    if not settings.AGENT_API_KEY:
         return
-    if not hmac.compare_digest(x_api_key, AGENT_API_KEY):
+    if not hmac.compare_digest(x_api_key, settings.AGENT_API_KEY):
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
 # ---------- 数据模型 ----------
-class ChatRequest(BaseModel):
-    query: str
-    thread_id: str = "user-session-1"
-    screenshot_uploaded: bool = False
-    screenshot_round: int = 0
-
-class ChatResponse(BaseModel):
-    response: str
-    screenshot_requested: bool = False  # True 表示 Agent 需要客户端截图上传后重发原问题
-    screenshot_instruction: str = ""
-
 class ScreenshotRequest(BaseModel):
     image: str          # Base64 编码的 JPEG 图片
     thread_id: str = "user-session-1"
@@ -65,26 +57,21 @@ async def chat_endpoint(req: ChatRequest):
     app_logger = get_logger("app")
     start = time.time()
     app_logger.info(
-        "📨 [收到 /chat 请求] thread_id=%s | 截图已上传=%s | 截图轮次=%d | 问题=%r",
-        req.thread_id, req.screenshot_uploaded, req.screenshot_round, req.query,
-    )
+        "📨 [收到 /chat 请求] thread_id=%s | 问题=%r | 状态=%s",req.thread_id, req.query, req.status)
     try:
-        resp, screenshot_requested, screenshot_instruction = get_response(
+        response = get_response(
             req.query,
             req.thread_id,
-            req.screenshot_uploaded,
-            req.screenshot_round,
+            req.status
         )
-        elapsed = time.time() - start
-        app_logger.info(
-            "✅ [/chat 完成] thread_id=%s | 耗时=%.2fs | 需要截图=%s",
-            req.thread_id, elapsed, screenshot_requested,
-        )
-        return ChatResponse(
-            response=resp,
-            screenshot_requested=screenshot_requested,
-            screenshot_instruction=screenshot_instruction,
-        )
+
+        if response.status == "completed":
+            elapsed = time.time() - start
+            app_logger.info(
+                "✅ [/chat 完成] thread_id=%s | 耗时=%.2fs",req.thread_id, elapsed)
+            
+        return response
+    
     except Exception as e:
         app_logger.exception("❌ [/chat 异常] thread_id=%s | 错误=%s", req.thread_id, e)
         raise HTTPException(status_code=500, detail=str(e))
