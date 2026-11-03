@@ -9,9 +9,8 @@ from infrastructure.models import (
 from infrastructure.schema import (
     chat_llm_state,
     screenshot_llm_state,
-    screenshot_respond,
     ChatRequest,
-    ChatResponse
+    ChatResponse,
 )
 
 __all__ = [
@@ -24,9 +23,6 @@ __all__ = [
     # 状态图结构
     "chat_llm_state",
     "screenshot_llm_state",
-
-    # 工具数据模型
-    "screenshot_respond",
 
     # 客户端收发数据模型
     "ChatRequest",

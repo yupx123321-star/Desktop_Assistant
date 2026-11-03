@@ -87,19 +87,13 @@ async def chat_stream_endpoint(req: ChatRequest):
 
     def run() -> None:
         try:
-            response, screenshot_requested, screenshot_instruction = get_response(
+            response = get_response(
                 req.query,
                 req.thread_id,
-                req.screenshot_uploaded,
-                req.screenshot_round,
+                req.status,
                 progress_callback=progress,
             )
-            events.put({
-                "type": "result",
-                "response": response,
-                "screenshot_requested": screenshot_requested,
-                "screenshot_instruction": screenshot_instruction,
-            })
+            events.put({"type": "result", **response.model_dump()})
         except Exception as error:
             events.put({"type": "error", "message": str(error)})
         finally:

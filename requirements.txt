@@ -1,1 +1,29 @@
+# ===== 服务端依赖（agent_assistrant_server 环境）=====
+# 基础服务
 python-dotenv>=1.0,<2
+pydantic>=2
+pydantic-settings>=2
+fastapi>=0.115
+uvicorn[standard]>=0.30
+requests>=2.31
+pillow>=10
+beautifulsoup4>=4.12
+lxml>=5
+serpapi>=0.1
+
+# LangChain / LangGraph
+langchain>=1.0
+langchain-openai>=1.0
+langchain-chroma
+langgraph>=1.0
+chromadb>=0.5
+
+# 可选：本地 CrossEncoder 重排序模型（体积较大）。
+# 不安装时 RAG 会自动退化为按向量相似度顺序返回。
+# sentence-transformers>=3.0
+
+# ===== 客户端依赖（已有 agent 环境，无需在此安装）=====
+# requests
+# mss
+# pillow
+# python-dotenv

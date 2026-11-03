@@ -8,6 +8,11 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 
+# Editor settings
+.vscode/
+
 # Local logs and runtime data
 *.log
 logs/
+data/screenshots/
+data/furina_chroma/

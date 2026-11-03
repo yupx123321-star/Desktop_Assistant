@@ -14,7 +14,6 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import Optional
-
 from langchain.tools import tool
 from langgraph.types import interrupt
 from config import get_settings
@@ -33,6 +32,7 @@ class Screenshot:
     path: str
     width: int
     height: int
+    timestamp: float = 0.0
 
 
 def cleanup_old_screenshots(retention: float = settings.SCREENSHOT_RETENTION) -> int:
@@ -193,8 +193,7 @@ def make_request_screenshot_tool(
     @tool
     def request_screenshot(instruction: str) -> str:
         """请求查看用户当前屏幕截图，用于回答涉及用户本地屏幕内容的问题。
-        仅当用户询问"我屏幕上/我电脑里/我桌面上/我打开的页面/帮我看看"等
-        需要查看其本地屏幕内容的问题时才调用此工具。
+        当用户询问"我屏幕上/我电脑里/我桌面上/我打开的页面/帮我看看"等需要查看其本地屏幕内容的问题时调用此工具。
         Args:
             instruction: 给用户的截图指导，告诉用户截图前应该准备什么画面。
                 必须具体、有针对性，例如"请打开代码编辑器并确保报错信息完整可见"，

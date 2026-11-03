@@ -11,7 +11,7 @@ import uuid
 
 from config import *
 from infrastructure import ensure_all_loaded, load_chroma
-from agent.core import build_agent, clean_response
+from agent.core import chat_agent, clean_response
 from tools.rag_search import _rerank_documents
 from langchain.messages import HumanMessage, AIMessage, ToolMessage
 
@@ -42,7 +42,7 @@ def print_rag_details(query: str):
         print(f"  {mark} rerank={score:.4f} | {preview}...")
 
     # 3. 最终进入 prompt 的参考材料
-    final_docs = [doc.page_content for doc, score in reranked if score > 1.0]
+    final_docs = [doc.page_content for doc, score in reranked if score >= 1.0]
     print(f"\n[3] 最终参考材料: {len(final_docs)} 条")
     if not final_docs:
         print("  (空 —— 所有文档 rerank 分数均 ≤ 1.0，Agent 将无参考材料)")
@@ -55,7 +55,7 @@ def run_agent(query: str, thread_id: str):
     RAG 现在是 Agent 的工具，不再硬编码注入参考材料，
     由 Agent 根据 role_description 中描述的工作流程自主决定是否调用 rag_search。
     """
-    agent = build_agent()
+    agent = chat_agent
     input_msg = HumanMessage(content=query)
     config = {"configurable": {"thread_id": thread_id}}
 

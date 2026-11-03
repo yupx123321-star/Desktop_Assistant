@@ -7,17 +7,25 @@ from infrastructure.models import load_chroma, load_reranker
 
 
 def _rerank_documents(query, documents, top_k=DEFAULT_RERANK_NUM):
-    """用 CrossEncoder 对初检文档重排序，返回 [(doc, score)]（按分数降序）。"""
+    """用 CrossEncoder 对初检文档重排序，返回 [(doc, score)]（按分数降序）。
+
+    未安装 sentence-transformers 或重排模型不可用时，退化为向量检索顺序，
+    保证 RAG 工具仍可用。
+    """
     if not documents:
         return []
-    model = load_reranker()
-    pairs = [(query, doc.page_content) for doc in documents]
-    scores = model.predict(pairs, batch_size=8, max_length=2048, show_progress_bar=False)
-    if hasattr(scores, "tolist"):
-        scores = scores.tolist()
-    doc_score_pairs = list(zip(documents, scores))
-    doc_score_pairs.sort(key=lambda x: x[1], reverse=True)
-    return [(doc, score) for doc, score in doc_score_pairs[:top_k]]
+    try:
+        model = load_reranker()
+        pairs = [(query, doc.page_content) for doc in documents]
+        scores = model.predict(pairs, batch_size=8, max_length=2048, show_progress_bar=False)
+        if hasattr(scores, "tolist"):
+            scores = scores.tolist()
+        doc_score_pairs = list(zip(documents, scores))
+        doc_score_pairs.sort(key=lambda x: x[1], reverse=True)
+        return [(doc, score) for doc, score in doc_score_pairs[:top_k]]
+    except Exception as exc:
+        print(f"⚠️ 重排序模型不可用，退化为向量检索顺序: {exc}")
+        return [(doc, 1.0) for doc in documents[:top_k]]
 
 
 def retrieve_context(query, search_num=DEFAULT_SEARCH_NUM, rerank_num=DEFAULT_RERANK_NUM):
@@ -26,8 +34,8 @@ def retrieve_context(query, search_num=DEFAULT_SEARCH_NUM, rerank_num=DEFAULT_RE
     initial_results = chroma.similarity_search_with_relevance_scores(query, k=search_num)
     docs = [doc for doc, _ in initial_results]
     reranked_docs = _rerank_documents(query, docs, top_k=rerank_num)
-    # 过滤低分（可根据实际情况调整阈值）
-    return [doc.page_content for doc, score in reranked_docs if score > 1.0]
+    # 过滤低分（未启用重排时分数固定为 1.0，应保留）
+    return [doc.page_content for doc, score in reranked_docs if score >= 1.0]
 
 
 @tool
