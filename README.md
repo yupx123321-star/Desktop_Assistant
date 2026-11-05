@@ -163,10 +163,11 @@ conda activate agent_assistrant_server
 pip install -r requirements.txt
 ```
 
-客户端依赖 `requests`、`mss`、`pillow`、`python-dotenv`，已有 `agent` 环境可直接使用：
+客户端依赖 `requests`、`mss`、`pillow`、`python-dotenv`。使用已有的 `agent` 环境，缺少依赖时补装：
 
 ```bash
 conda activate agent
+pip install requests mss pillow python-dotenv
 ```
 
 ## 配置

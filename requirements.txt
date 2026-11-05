@@ -22,8 +22,5 @@ chromadb>=0.5
 # 不安装时 RAG 会自动退化为按向量相似度顺序返回。
 # sentence-transformers>=3.0
 
-# ===== 客户端依赖（已有 agent 环境，无需在此安装）=====
-# requests
-# mss
-# pillow
-# python-dotenv
+# ===== 客户端依赖（在 agent 环境单独安装）=====
+# pip install requests mss pillow python-dotenv
