@@ -8,6 +8,7 @@ from langchain_chroma import Chroma
 
 # ---------- 全局单例变量 ----------
 _chat_model = None
+_vision_model = None
 _embeddings = None
 _chroma = None
 _reranker = None
@@ -32,6 +33,32 @@ def load_chat_model():
             max_tokens=settings.MAX_TOKENS,
         )
     return _chat_model
+
+
+def load_vision_model():
+    """加载截图分析用的多模态模型（必须支持图片输入）。
+
+    未配置 VISION_MODEL 时抛 RuntimeError，由截图工具转成规则化提示，
+    避免把图片发给纯文本模型后得到“没收到图片”这类无效回答。
+    """
+    global _vision_model
+    if _vision_model is None:
+        if not settings.VISION_MODEL:
+            raise RuntimeError(
+                "VISION_MODEL 未配置，请在 .env 中设置支持图片输入的视觉模型"
+            )
+        print(
+            f"Loading VisionModel from {settings.VISION_BASE_URL or 'default'} "
+            f"({settings.VISION_MODEL}) ..."
+        )
+        _vision_model = ChatOpenAI(
+            model=settings.VISION_MODEL,
+            base_url=settings.VISION_BASE_URL or None,
+            api_key=settings.VISION_API_KEY or "EMPTY",
+            temperature=settings.TEMPERATURE,
+            max_tokens=settings.MAX_TOKENS,
+        )
+    return _vision_model
 
 
 def load_embeddings():

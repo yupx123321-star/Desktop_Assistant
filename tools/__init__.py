@@ -10,7 +10,9 @@ from tools.web_search import web_search
 from tools.rag_search import rag_search, retrieve_context, _rerank_documents
 from tools.mcmod_search import mcmod_search
 from tools.screenshot import (
+    SCREENSHOT_UNAVAILABLE_MARKER,
     Screenshot,
+    ScreenshotUnavailableError,
     save_screenshot,
     get_next_screenshot,
     analyze_screenshot,
@@ -24,7 +26,9 @@ __all__ = [
     "retrieve_context",
     "_rerank_documents",
     "mcmod_search",
+    "SCREENSHOT_UNAVAILABLE_MARKER",
     "Screenshot",
+    "ScreenshotUnavailableError",
     "save_screenshot",
     "get_next_screenshot",
     "analyze_screenshot",

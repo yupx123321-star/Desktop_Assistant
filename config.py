@@ -21,6 +21,12 @@ class Settings(BaseSettings):
     CHAT_MODEL: str = ""
     CHAT_BASE_URL: str = ""
 
+    # 视觉模型（截图分析，必须支持图片输入）
+    # 为空时截图工具不会调用任何模型，直接走规则化回复
+    VISION_MODEL: str = ""
+    VISION_BASE_URL: str = ""
+    VISION_API_KEY: str = ""
+
     EMBED_MODEL: str = ""
     EMBED_BASE_URL: str = ""
 
@@ -66,6 +72,11 @@ if not settings.RERANKER_MODEL:
     settings.RERANKER_MODEL = settings.RERANK_MODEL
 if not settings.EMBED_BASE_URL:
     settings.EMBED_BASE_URL = settings.LLM_BASE_URL
+# 视觉模型未单独配置时，复用 LLM 的地址与密钥
+if not settings.VISION_BASE_URL:
+    settings.VISION_BASE_URL = settings.LLM_BASE_URL
+if not settings.VISION_API_KEY:
+    settings.VISION_API_KEY = settings.LLM_API_KEY
 
 
 def get_settings() -> Settings:

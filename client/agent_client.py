@@ -148,7 +148,7 @@ class AgentClient:
         import mss
         from PIL import Image
 
-        with mss.mss() as screen:
+        with mss.MSS() as screen:
             monitor = screen.monitors[1]
             shot = screen.grab(monitor)
         image = Image.frombytes("RGB", shot.size, shot.rgb)

@@ -8,7 +8,7 @@
 - **RAG 知识库检索**：使用 Chroma 向量库检索本地资料，并通过 CrossEncoder 重排序。
 - **联网搜索**：通过 SerpApi 获取实时 Google 搜索结果。
 - **MC 百科查询**：查询 MC 百科物品信息及相关评论。
-- **屏幕理解**：客户端倒计时截屏，服务端按需读取截图并继续当前会话。
+- **屏幕理解**：客户端倒计时截屏，服务端使用独立的视觉模型分析截图；截图缺失或识别失败时直接返回规则化提示，不再调用主模型。
 - **流式响应**：通过 NDJSON 推送 Agent 工具调用进度和最终结果。
 - **会话状态**：使用 LangGraph `MemorySaver` 按 `thread_id` 保存图状态，支持截图中断后的恢复。
 - **接口鉴权**：可通过 `X-API-Key` 请求头保护聊天和截图接口。
@@ -50,7 +50,9 @@ stateDiagram-v2
     chat_agent_call --> tools: should_go 返回 tools，即最后一条 AIMessage 含 tool_calls
     chat_agent_call --> [*]: should_go 返回 END，即没有待执行的工具
 
-    tools --> chat_agent_call: 工具结果以 ToolMessage 追加到 messages
+    tools --> chat_agent_call: route_after_tools：工具结果正常
+    tools --> screenshot_unavailable: route_after_tools：截图不可用标记
+    screenshot_unavailable --> [*]: 规则化回复，不调用 LLM
 
     note right of chat_agent_call
         chat_agent_call：LLM 调用节点
@@ -66,9 +68,16 @@ stateDiagram-v2
         web_search / rag_search
         mcmod_search / request_screenshot
     end note
+
+    note right of screenshot_unavailable
+        screenshot_unavailable：规则回复节点
+        读取 ToolMessage 中的失败原因
+        生成固定中文回复（AIMessage）
+        完全跳过 chat_agent_call
+    end note
 ```
 
-`START` 与 `END` 是 LangGraph 的虚拟节点（编译后为 `__start__` 和 `__end__`），图中只有两个真实节点：
+`START` 与 `END` 是 LangGraph 的虚拟节点（编译后为 `__start__` 和 `__end__`），图中有三个真实节点：
 
 | 节点 / 边 | 类型 | 结构说明 |
 | --- | --- | --- |
@@ -77,7 +86,9 @@ stateDiagram-v2
 | `chat_agent_call` → `tools` | 条件边 | `should_go` 检查最后一条消息的 `tool_calls`，非空则返回 `"tools"` |
 | `chat_agent_call` → `END` | 条件边 | 没有工具调用时返回 `END`，最后一条 `AIMessage` 即最终回答 |
 | `tools` | `ToolNode` | 读取最后一条 `AIMessage` 的 `tool_calls`，依次执行对应工具，并为每个调用生成一条 `ToolMessage` |
-| `tools` → `chat_agent_call` | 普通边 | 工具结果回填后重新进入 LLM 节点，形成“模型思考 → 调用工具 → 汇总结果”的 ReAct 循环 |
+| `tools` → `chat_agent_call` | 条件边 | `route_after_tools` 判断工具结果正常时回到 LLM 节点，形成“模型思考 → 调用工具 → 汇总结果”的 ReAct 循环 |
+| `tools` → `screenshot_unavailable` | 条件边 | `route_after_tools` 发现 `request_screenshot` 返回 `[SCREENSHOT_UNAVAILABLE]` 标记时走此分支 |
+| `screenshot_unavailable` | 规则回复节点 | 不使用 LLM，读取 `ToolMessage` 中的失败原因并生成固定中文回复，直接结束本轮对话 |
 
 `tools` 节点的内部工具：
 
@@ -86,7 +97,7 @@ stateDiagram-v2
 | `web_search` | 通过 SerpApi 执行 Google 联网搜索 | 搜索结果摘要 |
 | `rag_search` | Chroma 向量检索，可选 CrossEncoder 重排 | 与问题相关的本地资料片段 |
 | `mcmod_search` | 查询 MC 百科 | 物品信息及相关评论 |
-| `request_screenshot` | 请求用户当前屏幕截图 | 调用时通过 `interrupt` 暂停会话，恢复后返回截图的文字描述 |
+| `request_screenshot` | 请求用户当前屏幕截图 | 调用时通过 `interrupt` 暂停会话，恢复后返回截图的文字描述；截图缺失或视觉识别失败时返回 `[SCREENSHOT_UNAVAILABLE]` 标记 |
 
 工具分发发生在 `ToolNode` 内部，不会为每个工具单独创建图节点。`infrastructure/schema.py` 中的 `screenshot_llm_state` 是预留的截图子图状态，当前没有编译进主图。
 
@@ -115,9 +126,15 @@ sequenceDiagram
     API->>G: invoke(Command resume=路径)
     G->>T: 恢复 request_screenshot
     T->>T: analyze_screenshot 生成画面描述
-    T-->>G: ToolMessage
-    G->>G: 回到 chat_agent_call 继续推理
-    G-->>API: 最终 AIMessage
+    alt 截图缺失或视觉识别失败
+        T-->>G: ToolMessage（SCREENSHOT_UNAVAILABLE）
+        G->>G: screenshot_unavailable 规则化回复（不调用 LLM）
+        G-->>API: 固定回复 AIMessage
+    else 识别成功
+        T-->>G: ToolMessage（画面描述）
+        G->>G: 回到 chat_agent_call 继续推理
+        G-->>API: 最终 AIMessage
+    end
     API-->>C: status=completed 和 response
 ```
 
@@ -126,7 +143,8 @@ sequenceDiagram
 - `interrupt` 之前的状态（消息历史、工具调用参数）由检查点保存，恢复时不会重跑整个对话。
 - 客户端上传截图后，服务端把返回的 `path` 作为 `Command(resume=...)` 的值传回工具；`analyze_screenshot` 读取图片并生成描述，作为 `ToolMessage` 写回 `messages`。
 - 恢复后仍按同一张图继续执行，模型可以再次调用工具，也可以直接生成最终回答。
-- 如果视觉识别失败，`analyze_screenshot` 会返回一段降级说明，Agent 仍可继续回答。
+- 截图文件缺失、未配置 `VISION_MODEL`、视觉接口调用失败或返回空内容时，工具返回 `[SCREENSHOT_UNAVAILABLE]` 标记，图直接进入 `screenshot_unavailable` 节点生成规则化回复，不会再调用主 LLM。
+- 截图分析使用独立的视觉模型（`VISION_MODEL`）。如果把图片发给纯文本模型，接口通常不会报错，只会回复“没有收到图片”，因此不能复用纯文本的 `LLM_MODEL`。
 
 ## 项目结构
 
@@ -148,8 +166,9 @@ Agent_Master/
 
 ## 环境要求
 
-- Python 3.11（服务端 conda 环境：`agent_assistrant_server`）
+- Python 3.11（服务端 conda 环境：`agent_assistrant_server`；客户端 conda 环境：`agent_assistrant_client`）
 - 任意 OpenAI 兼容的 Chat 接口：本地 vLLM，或云端 API（如 DashScope）
+- 使用屏幕截图功能时，额外需要一个支持图片输入的视觉模型（`VISION_MODEL`）
 - 可选：本地 Chroma 向量库、角色描述文件、CrossEncoder 重排序模型
 - SerpApi API Key（仅使用联网搜索时需要）
 
@@ -163,12 +182,15 @@ conda activate agent_assistrant_server
 pip install -r requirements.txt
 ```
 
-客户端依赖 `requests`、`mss`、`pillow`、`python-dotenv`。使用已有的 `agent` 环境，缺少依赖时补装：
+客户端（新建环境）：
 
 ```bash
-conda activate agent
+conda create -n agent_assistrant_client python=3.11 -y
+conda activate agent_assistrant_client
 pip install requests mss pillow python-dotenv
 ```
+
+客户端只依赖 `requests`、`mss`、`pillow`、`python-dotenv`，不需要安装 `requirements.txt` 中的服务端依赖。
 
 ## 配置
 
@@ -183,6 +205,9 @@ LLM_API_KEY=your_api_key
 LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 LLM_MODEL=your_chat_model
 
+# 截图分析用视觉模型（必须支持图片输入）
+VISION_MODEL=qwen3-omni-flash
+
 # 可选：RAG 嵌入 / 重排序
 EMBED_MODEL=your_embedding_model
 EMBED_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
@@ -193,9 +218,12 @@ RERANK_MODEL=your_reranker_model
 
 当 `CHAT_MODEL` / `CHAT_BASE_URL` 未配置时，会自动回退到 `LLM_MODEL` / `LLM_BASE_URL`，因此本地 vLLM 与云端 API 两种方式可以共用一套配置。
 
+`VISION_MODEL` 单独配置截图分析模型，`VISION_BASE_URL` / `VISION_API_KEY` 默认复用 `LLM_BASE_URL` / `LLM_API_KEY`。不要把它指向纯文本模型（例如 DeepSeek 文本模型）：这类模型收到图片不会报错，只会回复“没有收到图片”，导致截图分析静默失败。留空时截图工具不调用任何模型，直接返回规则化提示。可用的视觉模型例如 DashScope 的 `qwen3-omni-flash`、`qwen3-vl-plus`。
+
 模型、向量库和截图目录目前在 `config.py` 中配置，部署前请按实际路径修改：
 
 - `LLM_MODEL`、`LLM_BASE_URL`（或旧配置名 `CHAT_MODEL`、`CHAT_BASE_URL`）
+- `VISION_MODEL`、`VISION_BASE_URL`、`VISION_API_KEY`（截图分析，需支持图片输入）
 - `EMBED_MODEL`、`EMBED_BASE_URL`
 - `RERANKER_MODEL`、`RERANKER_DEVICE`
 - `PERSIST_DIR`
@@ -243,6 +271,7 @@ curl http://localhost:8002/health
 服务端启动完成后，在另一个终端运行：
 
 ```bash
+conda activate agent_assistrant_client
 cd Agent_Master
 python -m client
 ```

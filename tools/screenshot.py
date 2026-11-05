@@ -17,10 +17,17 @@ from typing import Optional
 from langchain.tools import tool
 from langgraph.types import interrupt
 from config import get_settings
-from infrastructure.models import load_chat_model
+from infrastructure.models import load_vision_model
 
 # 限制最大 base64 长度（约 10MB 原始数据），防止恶意超大请求
 MAX_B64_LEN = 10 * 1024 * 1024
+
+# 截图不可用时工具返回的前缀，agent 路由据此跳过 LLM，直接输出规则化回复
+SCREENSHOT_UNAVAILABLE_MARKER = "[SCREENSHOT_UNAVAILABLE]"
+
+
+class ScreenshotUnavailableError(RuntimeError):
+    """截图缺失、损坏或视觉识别失败，需要规则化回复。"""
 _consumed_screenshot_times: dict[str, float] = {}
 _screenshot_state_lock = threading.Lock()
 
@@ -131,18 +138,21 @@ def get_next_screenshot(thread_id: str) -> Optional[Screenshot]:
         return Screenshot(thread_id=thread_id, path=path, width=img.width, height=img.height, timestamp=mtime)
 
 def analyze_screenshot(screenshot: Screenshot) -> str:
-    """用多模态 chat 模型（Qwen3.8 自带视觉能力）识别截图，返回文本描述。
+    """用多模态模型识别截图，返回文本描述；失败抛 ScreenshotUnavailableError。
 
-    直接把截图编码为 base64 data URL，作为 image_url 内容块发给
-    现有的 chat 模型（vLLM 的 OpenAI 兼容接口支持多模态），
-    让模型描述画面内容，供 Agent 据此回答用户问题。
+    视觉模型与主对话模型分开配置（VISION_MODEL）。纯文本模型收到 image_url
+    时通常不会报错，而是回复“没有收到图片”，这会把无效结果当成分析成功，
+    因此这里不调用 CHAT_MODEL，且所有失败都显式抛出，由 Agent 走规则化回复。
     """
+    if not os.path.isfile(screenshot.path):
+        raise ScreenshotUnavailableError("截图文件不存在或已被清理")
+
     try:
         with open(screenshot.path, "rb") as f:
             image_b64 = base64.b64encode(f.read()).decode("ascii")
         data_url = f"data:image/jpeg;base64,{image_b64}"
 
-        chat = load_chat_model()
+        chat = load_vision_model()
         resp = chat.invoke([
             {
                 "role": "user",
@@ -160,15 +170,13 @@ def analyze_screenshot(screenshot: Screenshot) -> str:
                 ],
             }
         ])
-        description = str(resp.content).strip()
-        if not description:
-            raise ValueError("视觉模型返回空内容")
-        return f"[用户屏幕截图] 分辨率 {screenshot.width}x{screenshot.height}。\n画面内容：{description}"
     except Exception as e:
-        return (
-            f"[用户屏幕截图] 分辨率 {screenshot.width}x{screenshot.height}，"
-            f"截图已收到，但视觉识别失败：{e}"
-        )
+        raise ScreenshotUnavailableError(f"视觉识别调用失败：{e}") from e
+
+    description = str(resp.content).strip()
+    if not description:
+        raise ScreenshotUnavailableError("视觉模型返回空内容")
+    return f"[用户屏幕截图] 分辨率 {screenshot.width}x{screenshot.height}。\n画面内容：{description}"
 
 
 def make_request_screenshot_tool(
@@ -210,9 +218,16 @@ def make_request_screenshot_tool(
             "type": "screenshot_request",   # 标记的类型为"screenshot_request"
             "instruction": guidance,
         })
-        from PIL import Image
-        with Image.open(cilent_respond) as img:
-            shot = Screenshot(thread_id=thread_id, path=cilent_respond, width=img.width, height=img.height)
-        return analyze_screenshot(shot)
+        if not isinstance(cilent_respond, str) or not cilent_respond.strip():
+            return f"{SCREENSHOT_UNAVAILABLE_MARKER}未收到有效的截图路径"
+        try:
+            from PIL import Image
+            with Image.open(cilent_respond) as img:
+                shot = Screenshot(thread_id=thread_id, path=cilent_respond, width=img.width, height=img.height)
+            return analyze_screenshot(shot)
+        except ScreenshotUnavailableError as e:
+            return f"{SCREENSHOT_UNAVAILABLE_MARKER}{e}"
+        except Exception as e:
+            return f"{SCREENSHOT_UNAVAILABLE_MARKER}截图无法读取：{e}"
 
     return request_screenshot

@@ -1,5 +1,6 @@
 from infrastructure.models import (
     load_chat_model,
+    load_vision_model,
     load_embeddings,
     load_chroma,
     load_reranker,
@@ -15,6 +16,7 @@ from infrastructure.schema import (
 
 __all__ = [
     "load_chat_model",
+    "load_vision_model",
     "load_embeddings",
     "load_chroma",
     "load_reranker",
