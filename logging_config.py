@@ -12,8 +12,9 @@ import logging
 import os
 from logging.handlers import RotatingFileHandler
 
-# 日志目录（与截图目录同级，便于统一管理）
-LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
+# 日志目录：项目根目录下的 logs/（已在 .gitignore 中忽略）
+# 注意只需上一层 dirname；多套一层会把日志写到项目外（如 Desktop/logs/）。
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 LOG_FILE = os.path.join(LOG_DIR, "agent.log")

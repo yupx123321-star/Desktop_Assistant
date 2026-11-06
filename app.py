@@ -5,6 +5,8 @@ import queue
 import threading
 import time
 from typing import Literal, Optional, Any
+
+import openai
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -45,6 +47,43 @@ def require_api_key(x_api_key: str = Header(default="")):
     if not hmac.compare_digest(x_api_key, settings.AGENT_API_KEY):
         raise HTTPException(status_code=401, detail="Invalid or missing API key")
 
+# ---------- 上游异常映射 ----------
+def upstream_http_exception(error: Exception) -> HTTPException:
+    """把上游 LLM 的异常映射为语义化 HTTP 状态码，避免一律返回 500。
+
+    LangChain 会把 openai 的原始异常包装成自己的类型，但会用
+    ``raise ... from e`` 保留因果链，因此这里沿 __cause__ / __context__
+    逐层查找 openai 原始异常。客户端只看到 500 时会误以为是自身请求的问题，
+    实际上多数是上游鉴权、限流或地址配置错误。
+    """
+    seen: set[int] = set()
+    current: Optional[BaseException] = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        # 注意顺序：子类要排在父类之前（如 APITimeoutError 是 APIConnectionError 的子类）
+        if isinstance(current, openai.RateLimitError):
+            return HTTPException(status_code=429, detail=f"上游 LLM 限流或额度不足：{current}")
+        if isinstance(current, openai.AuthenticationError):
+            return HTTPException(status_code=502, detail=f"上游 LLM 鉴权失败，请检查服务端配置：{current}")
+        if isinstance(current, openai.PermissionDeniedError):
+            return HTTPException(status_code=502, detail=f"上游 LLM 拒绝访问：{current}")
+        if isinstance(current, openai.NotFoundError):
+            return HTTPException(status_code=502, detail=f"上游 LLM 模型或接口不存在：{current}")
+        if isinstance(current, openai.APITimeoutError):
+            return HTTPException(status_code=504, detail=f"上游 LLM 响应超时：{current}")
+        if isinstance(current, openai.APIConnectionError):
+            return HTTPException(status_code=502, detail=f"无法连接上游 LLM：{current}")
+        if isinstance(current, openai.APIStatusError):
+            return HTTPException(
+                status_code=502,
+                detail=f"上游 LLM 返回错误 {current.status_code}：{current}",
+            )
+        if isinstance(current, openai.OpenAIError):
+            return HTTPException(status_code=502, detail=f"上游 LLM 调用失败：{current}")
+        current = current.__cause__ or current.__context__
+    return HTTPException(status_code=500, detail=str(error))
+
+
 # ---------- 数据模型 ----------
 class ScreenshotRequest(BaseModel):
     image: str          # Base64 编码的 JPEG 图片
@@ -71,15 +110,18 @@ async def chat_endpoint(req: ChatRequest):
                 "✅ [/chat 完成] thread_id=%s | 耗时=%.2fs",req.thread_id, elapsed)
             
         return response
-    
+
+    except HTTPException:
+        raise
     except Exception as e:
         app_logger.exception("❌ [/chat 异常] thread_id=%s | 错误=%s", req.thread_id, e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise upstream_http_exception(e) from e
 
 
 @app.post("/chat/stream", dependencies=[Depends(require_api_key)])
 async def chat_stream_endpoint(req: ChatRequest):
     """以 NDJSON 推送 Agent 进度，最后推送完整 ChatResponse。"""
+    app_logger = get_logger("app")
     events: queue.Queue = queue.Queue()
 
     def progress(message: str) -> None:
@@ -95,7 +137,15 @@ async def chat_stream_endpoint(req: ChatRequest):
             )
             events.put({"type": "result", **response.model_dump()})
         except Exception as error:
-            events.put({"type": "error", "message": str(error)})
+            app_logger.exception(
+                "❌ [/chat/stream 异常] thread_id=%s | 错误=%s", req.thread_id, error
+            )
+            http_error = upstream_http_exception(error)
+            events.put({
+                "type": "error",
+                "message": http_error.detail,
+                "status_code": http_error.status_code,
+            })
         finally:
             events.put(None)
 
